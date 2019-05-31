@@ -97,6 +97,10 @@ typedef enum {
   kFlutterSemanticsActionCustomAction = 1 << 17,
   // A request that the node should be dismissed.
   kFlutterSemanticsActionDismiss = 1 << 18,
+  // Move the cursor forward by one word.
+  kFlutterSemanticsActionMoveCursorForwardByWord = 1 << 19,
+  // Move the cursor backward by one word.
+  kFlutterSemanticsActionMoveCursorBackwardByWord = 1 << 20,
 } FlutterSemanticsAction;
 
 // The set of properties that may be associated with a semantics node.
@@ -141,6 +145,14 @@ typedef enum {
   kFlutterSemanticsFlagHasToggledState = 1 << 16,
   // If true, the semantics node is "on". If false, the semantics node is "off".
   kFlutterSemanticsFlagIsToggled = 1 << 17,
+  // Whether the platform can scroll the semantics node when the user attempts
+  // to move the accessibility focus to an offscreen child.
+  //
+  // For example, a |ListView| widget has implicit scrolling so that users can
+  // easily move the accessibility focus to the next set of children. A
+  // |PageView| widget does not have implicit scrolling, so that users don't
+  // navigate to the next page when reaching the end of the current one.
+  kFlutterSemanticsFlagHasImplicitScrolling = 1 << 18,
 } FlutterSemanticsFlag;
 
 typedef enum {
@@ -265,15 +277,65 @@ typedef struct {
   double pixel_ratio;
 } FlutterWindowMetricsEvent;
 
+// The phase of the pointer event.
 typedef enum {
   kCancel,
+  // The pointer, which must have been down (see kDown), is now up.
+  //
+  // For touch, this means that the pointer is no longer in contact with the
+  // screen. For a mouse, it means the last button was released. Note that if
+  // any other buttons are still pressed when one button is released, that
+  // should be sent as a kMove rather than a kUp.
   kUp,
+  // The pointer, which must have been been up, is now down.
+  //
+  // For touch, this means that the pointer has come into contact with the
+  // screen. For a mouse, it means a button is now pressed. Note that if any
+  // other buttons are already pressed when a new button is pressed, that should
+  // be sent as a kMove rather than a kDown.
   kDown,
+  // The pointer moved while down.
+  //
+  // This is also used for changes in button state that don't cause a kDown or
+  // kUp, such as releasing one of two pressed buttons.
   kMove,
+  // The pointer is now sending input to Flutter. For instance, a mouse has
+  // entered the area where the Flutter content is displayed.
+  //
+  // A pointer should always be added before sending any other events.
   kAdd,
+  // The pointer is no longer sending input to Flutter. For instance, a mouse
+  // has left the area where the Flutter content is displayed.
+  //
+  // A removed pointer should no longer send events until sending a new kAdd.
   kRemove,
+  // The pointer moved while up.
   kHover,
 } FlutterPointerPhase;
+
+// The device type that created a pointer event.
+typedef enum {
+  kFlutterPointerDeviceKindMouse = 1,
+  kFlutterPointerDeviceKindTouch,
+} FlutterPointerDeviceKind;
+
+// Flags for the |buttons| field of |FlutterPointerEvent| when |device_kind|
+// is |kFlutterPointerDeviceKindMouse|.
+typedef enum {
+  kFlutterPointerButtonMousePrimary = 1 << 0,
+  kFlutterPointerButtonMouseSecondary = 1 << 1,
+  kFlutterPointerButtonMouseMiddle = 1 << 2,
+  kFlutterPointerButtonMouseBack = 1 << 3,
+  kFlutterPointerButtonMouseForward = 1 << 4,
+  // If a mouse has more than five buttons, send higher bit shifted values
+  // corresponding to the button number: 1 << 5 for the 6th, etc.
+} FlutterPointerMouseButtons;
+
+// The type of a pointer signal.
+typedef enum {
+  kFlutterPointerSignalKindNone,
+  kFlutterPointerSignalKindScroll,
+} FlutterPointerSignalKind;
 
 typedef struct {
   // The size of this struct. Must be sizeof(FlutterPointerEvent).
@@ -285,6 +347,17 @@ typedef struct {
   // An optional device identifier. If this is not specified, it is assumed that
   // the embedder has no multitouch capability.
   int32_t device;
+  FlutterPointerSignalKind signal_kind;
+  double scroll_delta_x;
+  double scroll_delta_y;
+  // The type of the device generating this event.
+  // Backwards compatibility note: If this is not set, the device will be
+  // treated as a mouse, with the primary button set for |kDown| and |kMove|.
+  // If set explicitly to |kFlutterPointerDeviceKindMouse|, you must set the
+  // correct buttons.
+  FlutterPointerDeviceKind device_kind;
+  // The buttons currently pressed, if any.
+  int64_t buttons;
 } FlutterPointerEvent;
 
 struct _FlutterPlatformMessageResponseHandle;
@@ -321,7 +394,8 @@ typedef struct {
 
 // |FlutterSemanticsNode| ID used as a sentinel to signal the end of a batch of
 // semantics node updates.
-const int32_t kFlutterSemanticsNodeIdBatchEnd = -1;
+FLUTTER_EXPORT
+extern const int32_t kFlutterSemanticsNodeIdBatchEnd;
 
 // A node that represents some semantic data.
 //
@@ -392,7 +466,8 @@ typedef struct {
 
 // |FlutterSemanticsCustomAction| ID used as a sentinel to signal the end of a
 // batch of semantics custom action updates.
-const int32_t kFlutterSemanticsCustomActionIdBatchEnd = -1;
+FLUTTER_EXPORT
+extern const int32_t kFlutterSemanticsCustomActionIdBatchEnd;
 
 // A custom semantics action, or action override.
 //
@@ -408,7 +483,7 @@ typedef struct {
   size_t struct_size;
   // The unique custom action or action override ID.
   int32_t id;
-  // For overriden standard actions, corresponds to the
+  // For overridden standard actions, corresponds to the
   // |FlutterSemanticsAction| to override.
   FlutterSemanticsAction override_action;
   // The user-readable name of this custom semantics action.
@@ -424,6 +499,52 @@ typedef void (*FlutterUpdateSemanticsNodeCallback)(
 typedef void (*FlutterUpdateSemanticsCustomActionCallback)(
     const FlutterSemanticsCustomAction* /* semantics custom action */,
     void* /* user data */);
+
+typedef struct _FlutterTaskRunner* FlutterTaskRunner;
+
+typedef struct {
+  FlutterTaskRunner runner;
+  uint64_t task;
+} FlutterTask;
+
+typedef void (*FlutterTaskRunnerPostTaskCallback)(
+    FlutterTask /* task */,
+    uint64_t /* target time nanos */,
+    void* /* user data */);
+
+// An interface used by the Flutter engine to execute tasks at the target time
+// on a specified thread. There should be a 1-1 relationship between a thread
+// and a task runner. It is undefined behavior to run a task on a thread that is
+// not associated with its task runner.
+typedef struct {
+  // The size of this struct. Must be sizeof(FlutterTaskRunnerDescription).
+  size_t struct_size;
+  void* user_data;
+  // May be called from any thread. Should return true if tasks posted on the
+  // calling thread will be run on that same thread.
+  //
+  // This field is required.
+  BoolCallback runs_task_on_current_thread_callback;
+  // May be called from any thread. The given task should be executed by the
+  // embedder on the thread associated with that task runner by calling
+  // |FlutterEngineRunTask| at the given target time. The system monotonic clock
+  // should be used for the target time. The target time is the absolute time
+  // from epoch (NOT a delta) at which the task must be returned back to the
+  // engine on the correct thread. If the embedder needs to calculate a delta,
+  // |FlutterEngineGetCurrentTime| may be called and the difference used as the
+  // delta.
+  //
+  // This field is required.
+  FlutterTaskRunnerPostTaskCallback post_task_callback;
+} FlutterTaskRunnerDescription;
+
+typedef struct {
+  // The size of this struct. Must be sizeof(FlutterCustomTaskRunners).
+  size_t struct_size;
+  // Specify the task runner for the thread on which the |FlutterEngineRun| call
+  // is made.
+  const FlutterTaskRunnerDescription* platform_task_runner;
+} FlutterCustomTaskRunners;
 
 typedef struct {
   // The size of this struct. Must be sizeof(FlutterProjectArgs).
@@ -527,14 +648,34 @@ typedef struct {
   // Flutter application (such as compiled shader programs used by Skia).
   // This is optional.  The string must be NULL terminated.
   const char* persistent_cache_path;
-  // A callback that gets invoked by the engine when it attempts to wait for
-  // a platform vsync event. The engine will give the platform a baton that
-  // needs to be returned back to the engine via |FlutterEngineOnVsync|. All
-  // vsync operations must occur on the thread that made the call to
-  // |FlutterEngineRun|. All batons must be retured to the engine before
-  // initializing a |FlutterEngineShutdown|. Not doing the same will result in a
-  // memory leak.
+
+  // If true, we'll only read the existing cache, but not write new ones.
+  bool is_persistent_cache_read_only;
+
+  // A callback that gets invoked by the engine when it attempts to wait for a
+  // platform vsync event. The engine will give the platform a baton that needs
+  // to be returned back to the engine via |FlutterEngineOnVsync|. All batons
+  // must be retured to the engine before initializing a
+  // |FlutterEngineShutdown|. Not doing the same will result in a memory leak.
+  // While the call to |FlutterEngineOnVsync| must occur on the thread that made
+  // the call to |FlutterEngineRun|, the engine will make this callback on an
+  // internal engine-managed thread. If the components accessed on the embedder
+  // are not thread safe, the appropriate re-threading must be done.
   VsyncCallback vsync_callback;
+
+  // The name of a custom Dart entrypoint. This is optional and specifying a
+  // null or empty entrypoint makes the engine look for a method named "main" in
+  // the root library of the application.
+  //
+  // Care must be taken to ensure that the custom entrypoint is not tree-shaken
+  // away. Usually, this is done using the `@pragma('vm:entry-point')`
+  // decoration.
+  const char* custom_dart_entrypoint;
+
+  // Typically the Flutter engine create and manages its internal threads. This
+  // optional argument allows for the specification of task runner interfaces to
+  // event loops managed by the embedder on threads it creates.
+  const FlutterCustomTaskRunners* custom_task_runners;
 } FlutterProjectArgs;
 
 FLUTTER_EXPORT
@@ -623,7 +764,21 @@ FlutterEngineResult FlutterEngineDispatchSemanticsAction(
     size_t data_length);
 
 // Notify the engine that a vsync event occurred. A baton passed to the
-// platform via the vsync callback must be returned.
+// platform via the vsync callback must be returned. This call must be made on
+// the thread on which the call to |FlutterEngineRun| was made.
+//
+// |frame_start_time_nanos| is the point at which the vsync event occurred or
+// will occur. If the time point is in the future, the engine will wait till
+// that point to begin its frame workload. The system monotonic clock is used as
+// the timebase.
+//
+// |frame_target_time_nanos| is the point at which the embedder anticipates the
+// next vsync to occur. This is a hint the engine uses to schedule Dart VM
+// garbage collection in periods in which the various threads are most likely to
+// be idle. For example, for a 60Hz display, embedders should add 16.6 * 1e6 to
+// the frame time field. The system monotonic clock is used as the timebase.
+//
+// That frame timepoints are in nanoseconds.
 FLUTTER_EXPORT
 FlutterEngineResult FlutterEngineOnVsync(FlutterEngine engine,
                                          intptr_t baton,
@@ -634,7 +789,8 @@ FlutterEngineResult FlutterEngineOnVsync(FlutterEngine engine,
 // the timeline is unavailable or disabled, this has no effect. Must be
 // balanced with an duration end event (via
 // |FlutterEngineTraceEventDurationEnd|) with the same name on the same thread.
-// Can be called on any thread.
+// Can be called on any thread. Strings passed into the function will NOT be
+// copied when added to the timeline. Only string literals may be passed in.
 FLUTTER_EXPORT
 void FlutterEngineTraceEventDurationBegin(const char* name);
 
@@ -642,15 +798,39 @@ void FlutterEngineTraceEventDurationBegin(const char* name);
 // timeline is unavailable or disabled, this has no effect. This call must be
 // preceded by a trace duration begin call (via
 // |FlutterEngineTraceEventDurationBegin|) with the same name on the same
-// thread. Can be called on any thread.
+// thread. Can be called on any thread. Strings passed into the function will
+// NOT be copied when added to the timeline. Only string literals may be passed
+// in.
 FLUTTER_EXPORT
 void FlutterEngineTraceEventDurationEnd(const char* name);
 
 // A profiling utility. Logs a trace duration instant event to the timeline. If
 // the timeline is unavailable or disabled, this has no effect. Can be called
-// on any thread.
+// on any thread. Strings passed into the function will NOT be copied when added
+// to the timeline. Only string literals may be passed in.
 FLUTTER_EXPORT
 void FlutterEngineTraceEventInstant(const char* name);
+
+// Posts a task onto the Flutter render thread. Typically, this may be called
+// from any thread as long as a |FlutterEngineShutdown| on the specific engine
+// has not already been initiated.
+FLUTTER_EXPORT
+FlutterEngineResult FlutterEnginePostRenderThreadTask(FlutterEngine engine,
+                                                      VoidCallback callback,
+                                                      void* callback_data);
+
+// Get the current time in nanoseconds from the clock used by the flutter
+// engine. This is the system monotonic clock.
+FLUTTER_EXPORT
+uint64_t FlutterEngineGetCurrentTime();
+
+// Inform the engine to run the specified task. This task has been given to
+// the engine via the |FlutterTaskRunnerDescription.post_task_callback|. This
+// call must only be made at the target time specified in that callback. Running
+// the task before that time is undefined behavior.
+FLUTTER_EXPORT
+FlutterEngineResult FlutterEngineRunTask(FlutterEngine engine,
+                                         const FlutterTask* task);
 
 #if defined(__cplusplus)
 }  // extern "C"
